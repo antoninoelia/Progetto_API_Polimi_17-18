@@ -1,1 +1,1 @@
-# simulatore_macchina_Turing
+# simulatore di macchine di Turing

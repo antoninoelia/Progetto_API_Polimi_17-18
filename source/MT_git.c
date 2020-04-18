@@ -1,351 +1,503 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-#define DIMBUFFER 100
-#define STRINGBUFFER 128
-#define DIMNASTRO 128 
-#define DIMREAD 96
-#define DIMSTATE 64
+#define BUFFER_SIZE 100
+#define CHUNK_TAPE 128
+#define READABLE_CHAR 96
+#define CHUNK_STATE 64
+#define OFFSET_ASCII 32
 
 typedef struct end_trans
 {
-    unsigned int end_state;
+    uint32_t end_state;
     char move;
     char write;
     struct end_trans *next;
-}End_Trans; // 16 byte
+}end_trans_t;
 
 typedef struct start_trans
 {
-    End_Trans *read[DIMREAD];  
-}Start_Trans; // 768 byte
+    end_trans_t *read[READABLE_CHAR];
+}start_trans_t;
 
 typedef struct computation
 {
-    unsigned int dimleft;
-    unsigned int dimright;
-    char *left;
-    char *right;
-    unsigned int state;
-    long int step;
-    unsigned int poshead;
-    char current;
+    uint32_t left_tape_size;
+    uint32_t right_tape_size;
+    char *left_tape;
+    char *right_tape;
+    uint32_t state;
+    uint64_t step;
+    uint32_t pos_head;
+    char current_tape;
     struct computation *next;
-}Computation;
+}computation_t;
 
 typedef struct MT
 {
-    Start_Trans *transitions;
-    unsigned int actualdim;
-    unsigned int max_state;
-    unsigned int max_step;
-    //stati di accettazione
-    char *acc;
-    int accdim;
-}mt;
+    start_trans_t *transitions;
+    uint32_t states_array_size;
+    uint32_t max_step;
+    char *acceptance_states;
+    uint32_t acceptance_states_size;
+}turing_machine_t;
 
-static inline End_Trans* insert_head(End_Trans *first, End_Trans *new_endtrans) //first è il contenuto di read[i]
+static inline end_trans_t* insert_head(end_trans_t *first, end_trans_t *new_end_trans);
+
+static inline void extend_array_states(start_trans_t **states_array, const uint32_t new_states_array_size, uint32_t *states_array_size);
+
+static inline void reduce_array_states(start_trans_t **array, uint32_t *states_array_size, const uint32_t max_state);
+
+static inline start_trans_t *init_start_trans();
+
+static inline computation_t *init_computation();
+
+static inline computation_t *init_new_computation(const computation_t *old_computation);
+
+static inline void check_expected_input(const char *input_string);
+
+static inline void read_acceptance_states(const uint32_t states_array_size, uint32_t *acceptance_states_size, char **acceptance_states);
+
+static inline void read_transition_function(uint32_t *states_array_size, start_trans_t **states_array);
+
+static inline turing_machine_t* read_turing_machine();
+
+static inline computation_t *perform_computation(computation_t *computation, const uint32_t end_state, const char move, const char write);
+
+static inline computation_t *perform_ND_computation(const computation_t *old_computation, uint32_t end_state, char move, char write);
+
+static inline void free_turing_machine(turing_machine_t *machine);
+
+static inline void free_computation(computation_t *computation);
+
+static inline void free_computations_list(computation_t *list);
+
+static inline bool read_input_string(computation_t *current_computation);
+
+static inline void print_mt(turing_machine_t *machine);
+
+int main(int argc, char const *argv[])
 {
-    new_endtrans->next = first;
-    first = new_endtrans;
+    bool is_accept = false, is_not_determinable = false;
+    uint32_t char_to_index = 0;
+    computation_t *head = NULL;
+    computation_t *new_list_comp = NULL;
+    computation_t *tmp_comp = NULL;
+    end_trans_t *iterator = NULL;
+    turing_machine_t *machine = read_turing_machine();
+    computation_t *current_computation = init_computation();
+    read_input_string(current_computation);
+    head = current_computation;
+    /**
+     * Main cycle, reads input string and starts calculation.
+     * Cycle ends when there are no strings to read.
+     */
+    while (true)
+    {
+        /**
+         * Test string cycle, performs BFS on computation graph with two lists.
+         * The cycle ends when a computation accepts the string or
+         * moves are no longer available.
+        **/
+        iterator = NULL;
+        while (head != NULL && !is_accept)
+        {
+            current_computation = head;
+            while (current_computation != NULL)
+            {
+                if(current_computation->current_tape == 'r')
+                    char_to_index = (current_computation->right_tape[current_computation->pos_head]) - OFFSET_ASCII; // char_to_index è l'indice di read[]
+                else if(current_computation->current_tape == 'l')
+                    char_to_index = (current_computation->left_tape[current_computation->pos_head]) - OFFSET_ASCII;
+                if(current_computation->state < machine->states_array_size)
+                {
+                    iterator = machine->transitions[current_computation->state].read[char_to_index];
+                }
+                // Acceptance state, end string test
+                if(current_computation->state < machine->acceptance_states_size && machine->acceptance_states[current_computation->state] == 'T')
+                {
+                    is_accept = true;
+                    is_not_determinable = false;
+                    free_computations_list(current_computation);
+                    free_computations_list(new_list_comp);
+                    new_list_comp = NULL;
+                    break;
+                }
+                    // Undetermined
+                else if (current_computation->step == machine->max_step)
+                {
+                    head = current_computation->next;
+                    free_computation(current_computation);
+                    current_computation = head;
+                    is_not_determinable = true;
+                }
+                    // Sink state
+                else if (iterator == NULL)
+                {
+                    head = current_computation->next;
+                    free_computation(current_computation);
+                    current_computation = head;
+                }
+                else if (iterator != NULL)
+                {
+                    // Non deterministic computation
+                    while(iterator->next != NULL)
+                    {
+                        tmp_comp = perform_ND_computation(current_computation, iterator->end_state, iterator->move, iterator->write);
+                        tmp_comp->next = new_list_comp;
+                        new_list_comp = tmp_comp;
+                        iterator = iterator->next;
+                    }
+                    // Deterministic computation
+                    head = current_computation->next;
+                    current_computation = perform_computation(current_computation, iterator->end_state, iterator->move, iterator->write);
+                    current_computation->next = new_list_comp;
+                    new_list_comp = current_computation;
+                    current_computation = head;
+                    iterator = NULL;
+                }
+            }
+            head = new_list_comp;
+            new_list_comp = NULL;
+            iterator = NULL;
+        }
+        if(is_accept)
+            printf("1\n");
+        else if(is_not_determinable)
+            printf("U\n");
+        else printf("0\n");
+        current_computation = init_computation();
+        if(!read_input_string(current_computation))
+            break;
+        is_accept = false;
+        is_not_determinable = false;
+        head = current_computation;
+    }
+    free_turing_machine(machine);
+    free_computation(current_computation);
+    return 0;
+}
+
+static inline end_trans_t* insert_head(end_trans_t *first, end_trans_t *new_end_trans)
+{
+    new_end_trans->next = first;
+    first = new_end_trans;
     return first;
-};
+}
 
-static inline void extendedarray(Start_Trans **array, unsigned int nextdim, unsigned int actualdim) // Inizializza a NULL
+static inline void extend_array_states(start_trans_t **states_array, const uint32_t new_states_array_size, uint32_t *states_array_size)
 {
-    *array = realloc(*array, (nextdim)*sizeof(Start_Trans)); //array è start_trans
+    *states_array = realloc(*states_array, (new_states_array_size) * sizeof(start_trans_t)); //states_array è start_trans
+    if(*states_array == NULL)
+        exit(EXIT_FAILURE);
+    for(uint32_t i = *states_array_size; i < new_states_array_size; i++)
+    {
+        memset((*states_array)[i].read, '\0' , READABLE_CHAR * 8);
+    }
+    *states_array_size = new_states_array_size;
+}
+
+static inline void reduce_array_states(start_trans_t **array, uint32_t *states_array_size, const uint32_t max_state)
+{
+    *array = realloc(*array, (max_state)*sizeof(start_trans_t));
     if(*array == NULL)
         exit(EXIT_FAILURE);
-    for(unsigned int i=actualdim; i<nextdim; i++)
+    *states_array_size = max_state;
+}
+
+static inline start_trans_t *init_start_trans()
+{
+    start_trans_t *states = (start_trans_t*) malloc(CHUNK_STATE * sizeof(start_trans_t));
+    if (states == NULL)
     {
-       memset((*array)[i].read, '\0' ,DIMREAD*8);
+        exit(EXIT_FAILURE);
     }
-
-};
-
-static inline void reducedarray(Start_Trans **array, long unsigned int max_state)
-{
-    *array = realloc(*array, (max_state)*sizeof(Start_Trans));
-    if(*array == NULL)
-        exit(EXIT_FAILURE);
-};
-
-/**
- * Parsa la funzione di transizione della macchina di Turing
- */
-static inline mt* mt_function()
-{
-    mt *machine = (mt*) malloc(sizeof(mt));
-    if (machine == NULL)
-        exit(EXIT_FAILURE);
-    
-    Start_Trans *State = NULL; // Array di indirizzamento
-    unsigned int actualdim = DIMSTATE; //Dimensione attuale state
-    unsigned int max_state = 0; //Contatore per ridimensionare State
-    unsigned int nextdim; // Variabile d'appoggio per estendere e inizializzare State
-    End_Trans *new_endtrans = NULL; // Elemento per lista transiozione
-
-    //Variabili temporanee per parsing input
-    unsigned int tmpstart, tmpend, tmpacc; 
-    char tmpread, tmpwrite, tmpmove, buffer[DIMBUFFER];
-    char *acc = NULL; //Vettore di char usati come booleani
-    int accdim = 0;
-    int max_step;
-
-
-    State = (Start_Trans*) malloc(actualdim*sizeof(Start_Trans)); //Array di indirizzamento
-    if (State == NULL)
-        exit(EXIT_FAILURE);
-
-    for(unsigned int i=0; i<actualdim; i++)
+    for (uint32_t state_index = 0; state_index < CHUNK_STATE; state_index++)
     {
-       for(int j=0; j<96; j++)
+        for (uint32_t char_index = 0; char_index < READABLE_CHAR; char_index++)
         {
-            (State)[i].read[j] = NULL;
+            states[state_index].read[char_index] = NULL;
         }
     }
-    fgets(buffer, DIMBUFFER, stdin); //Consuma tr
-// CICLO ACQUISIZIONE FUNZIONE DI TRANSIZIONE
-    while(scanf("%u %c %c %c %u", &tmpstart, &tmpread, &tmpwrite, &tmpmove, &tmpend) == 5)
+    return states;
+}
+
+static inline computation_t *init_computation()
+{
+    computation_t *current_computation = NULL;
+    current_computation = (computation_t*) malloc(sizeof(computation_t));
+    if (current_computation == NULL)
+        exit(EXIT_FAILURE);
+    current_computation->next = NULL;
+    current_computation->state = 0;
+    current_computation->step = 0;
+    current_computation->pos_head = 0;
+    current_computation->current_tape = 'r';
+    current_computation->left_tape_size = CHUNK_TAPE;
+    current_computation->right_tape_size = CHUNK_TAPE;
+    current_computation->right_tape = NULL;
+    current_computation->left_tape = (char*) malloc(sizeof(char) * (current_computation->left_tape_size));
+    if(current_computation->left_tape == NULL)
+        exit(EXIT_FAILURE);
+    memset(current_computation->left_tape, '_', sizeof(char) * current_computation->left_tape_size);
+    return current_computation;
+}
+
+static inline computation_t *init_new_computation(const computation_t *old_computation)
+{
+    computation_t *new_computation = NULL;
+    new_computation = (computation_t*) malloc(sizeof(computation_t));
+    new_computation->next = NULL;
+    new_computation->step = old_computation->step;
+    new_computation->pos_head = old_computation->pos_head;
+    new_computation->current_tape = old_computation->current_tape;
+    new_computation->right_tape_size = old_computation->right_tape_size;
+    new_computation->left_tape_size = old_computation->left_tape_size;
+    new_computation->right_tape = (char*) malloc(sizeof(char) * (new_computation->right_tape_size));
+    new_computation->left_tape = (char*) malloc(sizeof(char) * (new_computation->left_tape_size));
+    memcpy(new_computation->right_tape, old_computation->right_tape, sizeof(char) * (new_computation->right_tape_size));
+    memcpy(new_computation->left_tape, old_computation->left_tape, sizeof(char) * (new_computation->left_tape_size));
+    return new_computation;
+}
+
+static inline void check_expected_input(const char *input_string)
+{
+    char buffer[BUFFER_SIZE];
+    if(fgets(buffer, BUFFER_SIZE, stdin) == NULL)
+        exit(EXIT_FAILURE);
+    if (strcmp(buffer, input_string) != 0)
     {
-        if(tmpstart >= actualdim) // Incrementa il vettore a multipli di 64 celle
-        {
-            nextdim = actualdim;
-            while(tmpstart >= nextdim)
-                nextdim += DIMSTATE;
-            extendedarray(&State, nextdim, actualdim);
-            actualdim = nextdim;
-        }
-        new_endtrans = malloc(sizeof(End_Trans));
-        if(new_endtrans == NULL)
-            exit(EXIT_FAILURE);
-        new_endtrans->end_state = tmpend;
-        new_endtrans->move = tmpmove;
-        new_endtrans->write = tmpwrite;
-        new_endtrans->next = NULL;
-        ((State[tmpstart]).read[tmpread-32]) = insert_head( ((State[tmpstart]).read[tmpread-32]), new_endtrans);
-        if(tmpstart > max_state)
-            max_state = tmpstart;
+        exit(EXIT_FAILURE);
     }
-    reducedarray(&State, max_state+1);
-    actualdim = max_state+1;
-// FINE CICLO, STATE COMPLETAMENTE PIENO DI DIMENSIONE ACTUALDIM
-    if(fgets(buffer, DIMBUFFER, stdin)); // consuma ACC
-    acc = malloc((actualdim)*sizeof(char));
-    memset(acc, 'F',sizeof(char)*(actualdim));
-    accdim = actualdim;
-// CICLO ACQUISIZIONE STATI DI ACCETTAZIONE
-    int cont = 0;
-    while(scanf(" %u\n", &tmpacc) == 1)
+}
+
+static inline void read_acceptance_states(const uint32_t states_array_size, uint32_t *acceptance_states_size, char **acceptance_states)
+{
+    uint32_t temp_acc = 0;
+    *acceptance_states = (char*) malloc((states_array_size) * sizeof(char));
+    memset(*acceptance_states, 'F',sizeof(char)*(states_array_size));
+    *acceptance_states_size = states_array_size;
+    while(scanf(" %u\n", &temp_acc) == 1)
     {
-        if(tmpacc >= accdim)
+        if(temp_acc >= *acceptance_states_size)
         {
-            acc = realloc(acc, (tmpacc+64)*sizeof(char));
-            for(unsigned int k = accdim; k<tmpacc+64; k++)
-                acc[k] = 'F';
-            acc[tmpacc] = 'T';
-            accdim = tmpacc+64;
+            *acceptance_states = realloc(*acceptance_states, (temp_acc + CHUNK_STATE)*sizeof(char));
+            for(uint32_t k = *acceptance_states_size; k< temp_acc + CHUNK_STATE; k++)
+                (*acceptance_states)[k] = 'F';
+
+            (*acceptance_states)[temp_acc] = 'T';
+            *acceptance_states_size = temp_acc + CHUNK_STATE;
         }
         else
         {
-            acc[tmpacc] = 'T';
+            (*acceptance_states)[temp_acc] = 'T';
         }
     }
-// FINE CICLO, ACC COMPLETAMENTE PIENO, DIMESIONE ACCDIM
-    if(fgets(buffer, DIMBUFFER, stdin)); // consuma MAX
-    scanf(" %u\n", &max_step);
-    if(fgets(buffer, DIMBUFFER, stdin)); // consuma run
+}
 
-    machine->transitions = State;
-    machine->max_state = max_state;
+static inline void read_transition_function(uint32_t *states_array_size, start_trans_t **states_array)
+{
+    char temp_read, temp_write, temp_move;
+    uint32_t new_states_array_size, temp_start, temp_end_state, max_state = 0;
+    end_trans_t *new_end_trans = NULL;
+    while(scanf("%u %c %c %c %u", &temp_start, &temp_read, &temp_write, &temp_move, &temp_end_state) == 5)
+    {
+        if(temp_start >= *states_array_size)
+        {
+            new_states_array_size = *states_array_size;
+            while(temp_start >= new_states_array_size)
+                new_states_array_size += CHUNK_STATE;
+            extend_array_states(states_array, new_states_array_size, states_array_size);
+        }
+        new_end_trans = (end_trans_t*) malloc(sizeof(end_trans_t));
+        if(new_end_trans == NULL)
+            exit(EXIT_FAILURE);
+        new_end_trans->end_state = temp_end_state;
+        new_end_trans->move = temp_move;
+        new_end_trans->write = temp_write;
+        new_end_trans->next = NULL;
+        (*states_array)[temp_start].read[temp_read - OFFSET_ASCII] = insert_head((*states_array)[temp_start].read[temp_read - OFFSET_ASCII], new_end_trans);
+        if(temp_start > max_state)
+            max_state = temp_start;
+    }
+    reduce_array_states(states_array, states_array_size, max_state + 1);
+}
+
+static inline turing_machine_t* read_turing_machine()
+{
+    char *acceptance_states = NULL;
+    uint32_t max_step = 0;
+    uint32_t acceptance_states_size = 0;
+    uint32_t num_states = CHUNK_STATE;
+    start_trans_t *states_array = NULL;
+
+    turing_machine_t *machine = (turing_machine_t*) malloc(sizeof(turing_machine_t));
+    if (machine == NULL)
+        exit(EXIT_FAILURE);
+
+    states_array = init_start_trans();
+    check_expected_input("tr\n");
+    read_transition_function(&num_states, &states_array);
+    check_expected_input("acc\n");
+    read_acceptance_states(num_states, &acceptance_states_size, &acceptance_states);
+    check_expected_input("max\n");
+
+    if(scanf(" %u\n", &max_step) != 1)
+        exit(EXIT_FAILURE);
+
+    check_expected_input("run\n");
+    machine->transitions = states_array;
     machine->max_step = max_step;
-    machine->actualdim = actualdim;
-    machine->acc = acc;
-    machine->accdim = accdim;
-
+    machine->states_array_size = num_states;
+    machine->acceptance_states = acceptance_states;
+    machine->acceptance_states_size = acceptance_states_size;
     return machine;
 }
-static inline Computation *new_Computation(Computation *old_computation, unsigned int end_state, char move, char write)
+
+static inline computation_t *perform_computation(computation_t *computation, const uint32_t end_state, const char move, const char write)
 {
-    unsigned int dim;
-    old_computation->step++;
-    old_computation->state = end_state;
-    old_computation->next = NULL;
-    if(old_computation->current == 'r')
-        old_computation->right[old_computation->poshead] = write;
+    uint32_t current_tape_size;
+    computation->step++;
+    computation->state = end_state;
+    computation->next = NULL;
+    if(computation->current_tape == 'r')
+        computation->right_tape[computation->pos_head] = write;
     else
-        old_computation->left[old_computation->poshead] = write;
+        computation->left_tape[computation->pos_head] = write;
     if(move == 'L')
     {
-        if(old_computation->current == 'r')
+        if(computation->current_tape == 'r')
         {
-            if(old_computation->poshead > 0)
-                old_computation->poshead--;
+            if(computation->pos_head > 0)
+                computation->pos_head--;
             else
             {
-                old_computation->poshead = 0;
-                old_computation->current = 'l';
+                computation->pos_head = 0;
+                computation->current_tape = 'l';
             }
         }
-        else if(old_computation->current == 'l')// sono nel nastro a sinistra
+        else if(computation->current_tape == 'l')
         {
-            if(old_computation->poshead < (old_computation->dimleft)-1) //se ho spazio
-                old_computation->poshead++;
+            if(computation->pos_head < (computation->left_tape_size) - 1)
+                computation->pos_head++;
             else
             {
-                dim = old_computation->dimleft;
-                old_computation->dimleft = old_computation->dimleft + DIMNASTRO;
-                old_computation->left = realloc(old_computation->left, sizeof(char)*(old_computation->dimleft));
-                for(long unsigned int i = dim; i < old_computation->dimleft; i++)
-                    old_computation->left[i] = '_';
-                old_computation->poshead++;
+                current_tape_size = computation->left_tape_size;
+                computation->left_tape_size = computation->left_tape_size + CHUNK_TAPE;
+                computation->left_tape = realloc(computation->left_tape, sizeof(char) * (computation->left_tape_size));
+                for(uint64_t i = current_tape_size; i < computation->left_tape_size; i++)
+                    computation->left_tape[i] = '_';
+                computation->pos_head++;
             }
         }
     }
     else if(move == 'R')
     {
-        if(old_computation->current == 'r')
+        if(computation->current_tape == 'r')
         {
-            if(old_computation->poshead < (old_computation->dimright)-1)
-                old_computation->poshead++;
+            if(computation->pos_head < (computation->right_tape_size) - 1)
+                computation->pos_head++;
             else
             {
-                dim = old_computation->dimright;
-                old_computation->dimright = old_computation->dimright + DIMNASTRO;
-                old_computation->right = realloc(old_computation->right, sizeof(char)*(old_computation->dimright));
-                for(long unsigned int i=dim; i<old_computation->dimright; i++)
-                    old_computation->right[i] = '_';
-                old_computation->poshead++;
+                current_tape_size = computation->right_tape_size;
+                computation->right_tape_size = computation->right_tape_size + CHUNK_TAPE;
+                computation->right_tape = realloc(computation->right_tape, sizeof(char) * (computation->right_tape_size));
+                for(uint64_t i=current_tape_size; i < computation->right_tape_size; i++)
+                    computation->right_tape[i] = '_';
+                computation->pos_head++;
             }
         }
-        else if(old_computation->current == 'l') // sono a sinistra
+        else if(computation->current_tape == 'l')
         {
-            if(old_computation->poshead > 0)
-                old_computation->poshead--;
+            if(computation->pos_head > 0)
+                computation->pos_head--;
             else
             {
-                old_computation->poshead = 0;
-                old_computation->current = 'r';
+                computation->pos_head = 0;
+                computation->current_tape = 'r';
             }
         }
     }
-    return old_computation;
+    return computation;
 }
 
-static inline Computation *new_ND_computation(Computation *old_computation, unsigned int end_state, char move, char write)
+static inline computation_t *perform_ND_computation(const computation_t *old_computation, uint32_t end_state, char move, char write)
 {
-    Computation *new_computation = NULL; unsigned int dim;
-    new_computation = malloc(sizeof(Computation));
-    new_computation->next = NULL;
-    new_computation->step = old_computation->step;
-    new_computation->step++;
-    new_computation->state = end_state;
-    new_computation->poshead = old_computation->poshead;
-    new_computation->current = old_computation->current;
-    new_computation->dimright = old_computation->dimright;
-    new_computation->dimleft = old_computation->dimleft;
-    new_computation->right = malloc(sizeof(char)*(new_computation->dimright));
-    new_computation->left = malloc(sizeof(char)*(new_computation->dimleft)); 
-    memcpy(new_computation->right, old_computation->right, sizeof(char)*(new_computation->dimright));
-    memcpy(new_computation->left, old_computation->left, sizeof(char)*(new_computation->dimleft));
-
-    if(new_computation->current == 'r')
-        new_computation->right[new_computation->poshead] = write;
-    else if(new_computation->current == 'l')
-        new_computation->left[new_computation->poshead] = write;
-    if(move == 'L')
-    {
-        if(new_computation->current == 'r')
-        {
-            if(new_computation->poshead > 0)
-                new_computation->poshead--;
-            else
-            {
-                new_computation->poshead = 0;
-                new_computation->current = 'l';
-            }
-        }
-        else if(new_computation->current == 'l')// sono nel nastro a sinistra
-        {
-            if(new_computation->poshead < (new_computation->dimleft)-1) //se ho spazio
-                new_computation->poshead++;
-            else
-            {
-                dim = new_computation->dimleft;
-                new_computation->dimleft = new_computation->dimleft + DIMNASTRO;
-                new_computation->left = realloc(new_computation->left, sizeof(char)*(new_computation->dimleft));
-                for(unsigned int i=dim; i < new_computation->dimleft; i++)
-                    new_computation->left[i] = '_';
-                new_computation->poshead++;
-            }
-        }
-    }
-    else if(move == 'R')
-    {
-        if(new_computation->current == 'r')
-        {
-            if(new_computation->poshead < (new_computation->dimright)-1)
-                new_computation->poshead++;
-            else
-            {
-                dim = new_computation->dimright;
-                new_computation->dimright = new_computation->dimright + DIMNASTRO;
-                new_computation->right = realloc(new_computation->right, sizeof(char)*(new_computation->dimright));
-                for(unsigned int i=dim; i< new_computation->dimright;  i++)
-                    new_computation->right[i] = '_';
-                new_computation->poshead++;
-            }
-        }
-        else // sono a sinistra
-        {
-            if(new_computation->poshead > 0)
-                new_computation->poshead--;
-            else
-            {
-                new_computation->poshead = 0;
-                new_computation->current = 'r';
-            }
-        }
-    }
-    return new_computation;  
+    computation_t *new_computation = init_new_computation(old_computation);
+    return perform_computation(new_computation, end_state, move, write);
 }
-static inline void clear_mem(mt *machine)
+
+static inline void free_turing_machine(turing_machine_t *machine)
 {
-    End_Trans *iter = NULL, *next = NULL; 
+    end_trans_t *iterator = NULL, *next = NULL;
 
     if (machine == NULL)
         return;
-    for (int i = 0; i < machine->actualdim; i++)
+    for (uint32_t i = 0; i < machine->states_array_size; i++)
     {
-        for (int j = 0; j < DIMREAD; j++)
+        for (uint32_t j = 0; j < READABLE_CHAR; j++)
         {
             if (machine->transitions[i].read[j] != NULL)
             {
-                iter = machine->transitions[i].read[j];
-                while (iter != NULL)
+                iterator = machine->transitions[i].read[j];
+                while (iterator != NULL)
                 {
-                    next = iter->next;
-                    free(iter);
-                    iter = next;
-                } 
-            } 
-        }  
+                    next = iterator->next;
+                    free(iterator);
+                    iterator = next;
+                }
+            }
+        }
     }
-    free(machine->acc);
+    free(machine->acceptance_states);
     free(machine->transitions);
     free(machine);
 }
 
-static inline void print_mt(mt *machine)
+static inline void free_computation(computation_t *computation)
 {
-    int y=0;
-    End_Trans *look = NULL; 
-   
-    printf("actual dim %u\n", machine->actualdim);
-    for(int i = 0; i < machine->actualdim; i++)
+    free(computation->left_tape);
+    free(computation->right_tape);
+    free(computation);
+}
+
+static inline void free_computations_list(computation_t *list)
+{
+    computation_t *next = NULL;
+    while (list != NULL)
     {
-        for(int j = 0; j < DIMREAD; j++)
+        next = list->next;
+        free_computation(list);
+        list = next;
+    }
+}
+
+static inline bool read_input_string(computation_t *current_computation)
+{
+    if(scanf(" %ms", &current_computation->right_tape) == 1)
+    {
+        int k = 0;
+        while(current_computation->right_tape[k] != '\0')
+            k++;
+        current_computation->right_tape[k] = '_';
+        current_computation->right_tape_size = k+1;
+        return true;
+    }
+    return false;
+}
+
+static inline void print_mt(turing_machine_t *machine)
+{
+    uint32_t y=0;
+    end_trans_t *look = NULL;
+
+    printf("actual dim %u\n", machine->states_array_size);
+    for(uint32_t i = 0; i < machine->states_array_size; i++)
+    {
+        for(uint32_t j = 0; j < READABLE_CHAR; j++)
         {
             if(machine->transitions[i].read[j] != NULL)
             {
@@ -360,159 +512,14 @@ static inline void print_mt(mt *machine)
             }
         }
     }
-    printf("x= %d\n", y);
-    printf("acc dim %u\n",machine->accdim);
-    
-    for(long unsigned int i = 0; i < machine->accdim; i++)
+    printf("x = %d\n", y);
+    printf("acc dim %u\n",machine->acceptance_states_size);
+
+    for(uint64_t i = 0; i < machine->acceptance_states_size; i++)
     {
-        if(machine->acc[i] == 'T')
-            printf("%lu\n",i);    
+        if(machine->acceptance_states[i] == 'T')
+            printf("%lu\n",i);
     }
-    printf("acc dim = %u", machine->accdim);
-    printf("\n");
+    printf("acc dim = %u\n", machine->acceptance_states_size);
     printf("max = %u\n", machine->max_step);
-}
-
-static inline void clear_comp(Computation *list)
-{
-    Computation *next = NULL;
-    while (list != NULL)
-    {
-        next = list->next;
-        free(list->right);
-        free(list->left);
-        free(list);
-        list = next;
-    }    
-}
-
-int main(int argc, char const *argv[])
-{
-    Computation *curr_comp = NULL;
-    Computation *head = NULL;
-    Computation *new_list_comp = NULL; 
-    Computation *tmp_comp = NULL;
-    mt *machine = mt_function();
-    int accept = 0, undet = 0;
-    End_Trans *iter = NULL;
-    unsigned int i = 0;
-    //print_mt(machine);
-    curr_comp = malloc(sizeof(Computation));
-    curr_comp->next = NULL;
-    curr_comp->state = 0;
-    curr_comp->step = 0;
-    curr_comp->poshead = 0;
-    curr_comp->current = 'r';
-    curr_comp->dimleft = DIMNASTRO;
-    curr_comp->dimright = DIMNASTRO;
-    curr_comp->right = NULL;
-    curr_comp->left = malloc(sizeof(char)*(curr_comp->dimleft));
-    memset(curr_comp->left, '_', sizeof(char)*curr_comp->dimleft);
-    scanf(" %ms", &curr_comp->right);    
-    int k = 0;
-    while(curr_comp->right[k] != '\0')
-        k++;
-    curr_comp->right[k] = '_';
-    curr_comp->dimright = k+1;
-    
-    head = curr_comp;
-    while (1)
-    {
-        iter = NULL;
-        while (head != NULL && accept != 1)
-        {
-            curr_comp = head;
-            while (curr_comp != NULL && accept != 1)
-            {
-                if(curr_comp->current == 'r')
-                    i = (curr_comp->right[curr_comp->poshead]) -32; // i è l'indice di read[]
-                else if(curr_comp->current == 'l')
-                    i = (curr_comp->left[curr_comp->poshead]) -32;
-                if(machine->actualdim > curr_comp->state)// cosi non sfondo il vett.
-                {
-                    iter = machine->transitions[curr_comp->state].read[i]; //non so se sia giusto
-                }
-                if(curr_comp->state < machine->accdim && machine->acc[curr_comp->state] == 'T') //accetto
-                {
-                    accept = 1;
-                    undet = 0;
-                    head = curr_comp;
-                    clear_comp(head);
-                    head = new_list_comp;
-                    clear_comp(head);
-                    head = NULL;
-                    new_list_comp = NULL;
-                    break;
-                }
-                else if (curr_comp->step == machine->max_step) //U
-                {
-                    head = curr_comp->next;
-                    free(curr_comp->left);
-                    free(curr_comp->right);
-                    free(curr_comp);
-                    undet = 1;
-                    curr_comp = head;   
-                }
-                else if (iter == NULL) //stato pozzo
-                {
-                    head = curr_comp->next;
-                    free(curr_comp->left);
-                    free(curr_comp->right);
-                    free(curr_comp);
-                    curr_comp = head;
-                }
-                else if (iter != NULL)
-                {
-                    while(iter->next != NULL) // esce dal ciclo con una computazione ancora da seguire
-                    {                     
-                        tmp_comp = new_ND_computation(curr_comp,iter->end_state, iter->move, iter->write);
-                        tmp_comp->next = new_list_comp;
-                        new_list_comp = tmp_comp;
-                        iter = iter->next;
-                    } // ho ancora un elemento nella lista di adiacenza
-                    head = curr_comp->next;                                       
-                    curr_comp = new_Computation(curr_comp, iter->end_state, iter->move, iter->write);
-                    curr_comp->next = new_list_comp;
-                    new_list_comp = curr_comp;
-                    curr_comp = head;  
-                    iter = NULL;  
-                }
-            } 
-            head = new_list_comp;
-            new_list_comp = NULL;
-            iter = NULL;  
-        }//esco da questo ciclo se non ho più computazioni eseguibili oppure ho accettato, TEST STRINGA FINITO
-        if(accept == 1)
-            printf("1\n");
-        else if(undet == 1)
-            printf("U\n");
-        else printf("0\n");
-        head = NULL;
-        curr_comp = malloc(sizeof(Computation));
-        curr_comp->state = 0;
-        curr_comp->step = 0;
-        curr_comp->poshead = 0;
-        curr_comp->next = NULL;
-        curr_comp->current = 'r';   
-        curr_comp->dimleft = DIMNASTRO;
-        curr_comp->left = malloc(sizeof(char)*(curr_comp->dimleft));
-        memset(curr_comp->left, '_', DIMNASTRO);
-        if(scanf(" %ms", &curr_comp->right)==1)
-        {
-            k = 0;
-            while(curr_comp->right[k] != '\0')
-                k++;
-            curr_comp->right[k] = '_';
-            curr_comp->dimright = k+1;
-        }
-        else
-            break;
-        accept = 0; undet = 0; 
-        head = curr_comp;
-    }
-    clear_mem(machine);
-    free(curr_comp->right);
-    free(curr_comp->left);
-    free(curr_comp);
-    return 0;
 }

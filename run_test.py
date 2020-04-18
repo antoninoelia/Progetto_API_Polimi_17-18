@@ -29,9 +29,11 @@ def run_test():
             print("\n***Test passed!***\n")
 
 
-dirname = os.path.dirname(__file__)
+dirname = os.path.abspath(os.getcwd())
 dir_source = dirname + '/source/'
 test_path = dirname + '/test_case'
+print(dirname)
+print(dir_source)
 
 os.system("gcc -O2 -o mt " + dir_source + "MT_git.c")
 run_test()
